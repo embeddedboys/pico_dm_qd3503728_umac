@@ -1,3 +1,6 @@
 [submodule "lib/FreeRTOS-Kernel"]
 	path = lib/FreeRTOS-Kernel
 	url = https://gitee.com/embeddedboys/FreeRTOS-Kernel
+[submodule "src/umac"]
+	path = src/umac
+	url = https://github.com/evansm7/umac

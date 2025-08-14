@@ -101,7 +101,7 @@ set(LCD_HOR_RES 480)
 set(LCD_VER_RES 320)
 set(DISP_OVER_PIO 1) # 1: PIO, 0: GPIO
 set(PIO_USE_DMA   1)   # 1: use DMA, 0: not use DMA
-set(I80_BUS_WR_CLK_KHZ 58000)
+set(I80_BUS_WR_CLK_KHZ 50000)
 
 # Rotation configuration
 set(LCD_ROTATION 1)  # 0: normal, 1: 90 degree, 2: 180 degree, 3: 270 degree
@@ -124,9 +124,6 @@ endif()
 
 include_directories(. ../include)
 
-# add lvgl library here
-add_subdirectory(lvgl)
-
 # include PIO library here
 add_subdirectory(pio)
 target_compile_definitions(pio_i80 PUBLIC LCD_PIN_RS=${LCD_PIN_RS})
@@ -135,25 +132,44 @@ target_compile_definitions(pio_i80 PUBLIC DEFAULT_PIO_CLK_KHZ=${PERI_CLK_KHZ})
 target_compile_definitions(pio_i80 PUBLIC PIO_USE_DMA=${PIO_USE_DMA})
 target_compile_definitions(pio_i80 PUBLIC I80_BUS_WR_CLK_KHZ=${I80_BUS_WR_CLK_KHZ})
 
-# include factory test library here
-# add_subdirectory(factory)
+set(TINYUSB_PATH ${PICO_SDK_PATH}/lib/tinyusb)
 
-# lv_conf.h need pico header files e.g. the custom tick
-target_link_libraries(lvgl PRIVATE pico_stdlib)
+# umac subproject (and Musashi sub-subproject)
+set(UMAC_PATH ${CMAKE_CURRENT_SOURCE_DIR}/umac)
+set(UMAC_EMULATOR ${UMAC_PATH}/main)
+set(UMAC_MUSASHI_PATH ${UMAC_PATH}/external/Musashi)
+set(UMAC_INCLUDE_PATHS ${UMAC_PATH}/include ${UMAC_MUSASHI_PATH})
 
 # user define common source files
 file(GLOB_RECURSE COMMON_SOURCES
     main.c
     ili9488.c
     ft6236.c
-    porting/lv_port_disp_template.c
-    porting/lv_port_indev_template.c
     i2c_tools.c
     backlight.c
+    hid.c
+    kbd.c
+    rom.S
+    disc.S
 )
 
+# This isn't very nice, but hey it's Sunday :p
+set(UMAC_SOURCES
+    ${UMAC_PATH}/src/disc.c
+    ${UMAC_PATH}/src/main.c
+    ${UMAC_PATH}/src/rom.c
+    ${UMAC_PATH}/src/scc.c
+    ${UMAC_PATH}/src/via.c
+    ${UMAC_MUSASHI_PATH}/m68kcpu.c
+    ${UMAC_MUSASHI_PATH}/m68kdasm.c
+    ${UMAC_MUSASHI_PATH}/m68kops.c
+    ${UMAC_MUSASHI_PATH}/softfloat/softfloat.c
+)
+
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DMUSASHI_CNF=\\\"../include/m68kconf.h\\\" -DUMAC_MEMSIZE=${MEMSIZE}")
+
 # rest of your project
-add_executable(${PROJECT_NAME} ${COMMON_SOURCES})
+add_executable(${PROJECT_NAME} ${COMMON_SOURCES} ${UMAC_SOURCES})
 target_link_libraries(${PROJECT_NAME}
     pico_stdlib
     pico_multicore
@@ -161,11 +177,34 @@ target_link_libraries(${PROJECT_NAME}
     pico_bootsel_via_double_reset
     hardware_pwm
     hardware_i2c
+    hardware_sync
     pio_i80
-    # factory_test
-    lvgl lvgl::demos lvgl::examples
+    tinyusb_host
+    tinyusb_board
 )
-target_include_directories(${PROJECT_NAME} PUBLIC .)
+target_include_directories(${PROJECT_NAME} PUBLIC
+    .
+    ${TINYUSB_PATH}/hw
+    ${TINYUSB_PATH}/src
+    ${UMAC_INCLUDE_PATHS}
+)
+
+# The umac sources need to prepare Musashi (some sources are generated):
+add_custom_command(OUTPUT ${UMAC_MUSASHI_PATH}/m68kops.c
+    COMMAND echo "*** Preparing umac source ***"
+    COMMAND make -C ${UMAC_PATH} prepare
+)
+add_custom_target(prepare_umac
+    DEPENDS ${UMAC_MUSASHI_PATH}/m68kops.c
+)
+add_custom_target(patch_rom
+    DEPENDS ${ROM_PATH}
+    COMMAND echo "*** Patching umac ROM ***"
+    COMMAND make -C ${UMAC_PATH} clean
+    COMMAND make -C ${UMAC_PATH} MEMSIZE=${MEMSIZE} DISP_WIDTH=${DISP_WIDTH} DISP_HEIGHT=${DISP_HEIGHT}
+    COMMAND ${UMAC_EMULATOR} -r ${ROM_PATH} -W ${CMAKE_CURRENT_LIST_DIR}/rom.bin || echo "Done."
+)
+add_dependencies(${PROJECT_NAME} prepare_umac patch_rom)
 
 # add target common defines here
 target_compile_definitions(${PROJECT_NAME} PUBLIC DEFAULT_SYS_CLK_KHZ=${SYS_CLK_KHZ})
@@ -181,7 +220,19 @@ target_compile_definitions(${PROJECT_NAME} PUBLIC LCD_ROTATION=${LCD_ROTATION})
 target_compile_definitions(${PROJECT_NAME} PUBLIC LCD_HOR_RES=${LCD_HOR_RES})
 target_compile_definitions(${PROJECT_NAME} PUBLIC LCD_VER_RES=${LCD_VER_RES})
 target_compile_definitions(${PROJECT_NAME} PUBLIC DISP_OVER_PIO=${DISP_OVER_PIO})
-target_compile_definitions(${PROJECT_NAME} PUBLIC MY_DISP_BUF_SIZE=${MY_DISP_BUF_SIZE})
+
+add_compile_definitions(MEMSIZE=${MEMSIZE})
+add_compile_definitions(DISP_WIDTH=${LCD_HOR_RES})
+add_compile_definitions(DISP_HEIGHT=${LCD_VER_RES})
+
+# Patch ROM and generate umac-rom.h for inlining contents
+# add_custom_command(
+#   OUTPUT umac-rom.h
+#   COMMAND ${CMAKE_CURRENT_LIST_DIR}/gen-rom.sh ${ROM_PATH} "umac-rom.h" ${MEMSIZE} ${DISP_WIDTH} ${DISP_HEIGHT}
+#   DEPENDS ${CMAKE_CURRENT_LIST_DIR}/gen-rom.sh ${ROM_PATH}
+#   COMMENT "Patching ROM for memory and display size, manually exit umac with <ctrl-Q> or <command-Q>"
+#   VERBATIM
+# )
 
 # Note: If you are using a NOR flash like "w25q16". Just keep the following content.
 # The maximum speed of "w25q16" is 133MHz, However, the clock speed of XIP QSPI is divided from "sys_clk".
@@ -208,7 +259,9 @@ message(WARNING "
     LCD_X       : ${LCD_HOR_RES}
     LCD_Y       : ${LCD_VER_RES}
     LCD rotation: ${LCD_ROTATION}   //0: normal, 1: 90 degree, 2: 180 degree, 3: 270 degree
-    Buffer size : ${DISP_BUF_SIZE} bytes (LVGL Draw Buffer)
+    uMac Memsize : ${MEMSIZE}
+    uMac width : ${DISP_WIDTH}
+    uMac height : ${DISP_HEIGHT}
 ")
 target_compile_definitions(bs2_default PRIVATE PICO_FLASH_SPI_CLKDIV=${PICO_FLASH_SPI_CLKDIV})
 target_compile_definitions(${PROJECT_NAME} PRIVATE FLASH_CLK_KHZ=${FLASH_CLK_KHZ})

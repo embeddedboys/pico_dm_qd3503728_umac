@@ -2,3 +2,4 @@ build-pico2
 build
 .cache
 compile_commands.json
+*.bin
